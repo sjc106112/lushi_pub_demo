@@ -1,5 +1,9 @@
 package main
 
+import (
+	"sync"
+)
+
 const (
 	BattlerState_Init    = 0
 	BattlerState_Ready   = 1
@@ -40,8 +44,8 @@ const (
 	BattleState_Battling = 0
 	BattleState_Finish   = 1
 
-	BattleChoseHeroTime  = 20
-	BattleReadyStepTime  = 20
+	BattleChoseHeroTime  = 5
+	BattleReadyStepTime  = 10
 	BattleBattleStepTime = 20
 
 	CardRefreshCostCoin = 1 //刷新卡牌花费
@@ -55,3 +59,131 @@ const (
 )
 
 var Player2Room = make(map[int64]*Battler)
+
+type CardArray struct {
+	data []*BattleCard
+	lock sync.Mutex
+}
+
+func CardArrayCreate(size int) *CardArray {
+	if size == 0 {
+		size = 8
+	}
+	card_array := &CardArray{
+		data: make([]*BattleCard, 0, size),
+		lock: sync.Mutex{},
+	}
+	return card_array
+}
+
+func CardArrayCreateByArray(array []*BattleCard) *CardArray {
+	card_array := &CardArray{
+		data: array,
+		lock: sync.Mutex{},
+	}
+	return card_array
+}
+
+func CardArrayCopy(card_array *CardArray) *CardArray {
+	new_array := &CardArray{
+		lock: sync.Mutex{},
+		data: make([]*BattleCard, len(card_array.data)),
+	}
+	copy(new_array.data, card_array.data)
+	return card_array
+}
+
+func (this *CardArray) Copy(card_array *CardArray) {
+	this.lock.Lock()
+	defer this.lock.Unlock()
+	this.data = make([]*BattleCard, 0, card_array.Size())
+	card_array.Iteration(func(idx int, card *BattleCard) bool {
+		if card != nil {
+			//log.Println(fmt.Sprintf("卡牌copy %d %d", card.Id, card.Owner.Id))
+			this.data = append(this.data, card)
+		}
+		return false
+	})
+}
+
+func (this *CardArray) Get(idx int) *BattleCard {
+	if this.IsEmpty() || this.Size() < idx {
+		return nil
+	}
+	return this.data[idx]
+}
+
+func (this *CardArray) IsEmpty() bool {
+	if this.data == nil || this.Size() <= 0 {
+		return true
+	}
+	return false
+}
+
+func (this *CardArray) Size() int {
+	return len(this.data)
+}
+
+func (this *CardArray) Add(card ...*BattleCard) {
+	this.lock.Lock()
+	defer this.lock.Unlock()
+	this.data = append(this.data, card...)
+}
+
+func (this *CardArray) RemoveByCardId(card_id int32) (int, *BattleCard) {
+	this.lock.Lock()
+	defer this.lock.Unlock()
+	for i, datum := range this.data {
+		if card_id == datum.Id {
+			this.data = append(this.data[:i], this.data[i+1:]...)
+			return i, datum
+		}
+	}
+	return -1, nil
+}
+
+func (this *CardArray) RemoveByIdx(idx int) *BattleCard {
+	this.lock.Lock()
+	defer this.lock.Unlock()
+	card := this.data[idx]
+	this.data = append(this.data[:idx], this.data[idx+1:]...)
+	return card
+}
+
+func (this *CardArray) Insert(card *BattleCard, idx int) {
+	this.lock.Lock()
+	defer this.lock.Unlock()
+	this.data = append(this.data, nil)
+	copy(this.data[idx+1:], this.data[idx:])
+	this.data[idx] = card
+}
+
+func (this *CardArray) Move(idx int, moved_idx int) {
+	this.lock.Lock()
+	defer this.lock.Unlock()
+	if idx < moved_idx {
+		tmp := this.data[idx]
+		copy(this.data[idx:moved_idx], this.data[idx+1:])
+		this.data[moved_idx] = tmp
+	} else {
+		tmp := this.data[idx]
+		copy(this.data[moved_idx+1:], this.data[moved_idx:idx])
+		this.data[moved_idx] = tmp
+	}
+}
+
+func (this *CardArray) Array() []*BattleCard {
+	return this.data
+}
+
+func (this *CardArray) Iteration(callback func(idx int, card *BattleCard) bool) (int, *BattleCard) {
+	if !this.IsEmpty() {
+		for idx, datum := range this.data {
+			returned := callback(idx, datum)
+			if !returned {
+				return idx, datum
+			}
+		}
+	}
+	return -1, nil
+}
