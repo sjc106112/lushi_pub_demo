@@ -9,10 +9,9 @@ import (
 	"time"
 )
 
-
-func CreatePubRoom( battlers []*Battler,heros []*BattleHero, card_map map[int32]*BattleCard) *PubRoom {
+func CreatePubRoom(battlers []*Battler, heros []*BattleHero, card_map map[int32]*BattleCard) *PubRoom {
 	room := &PubRoom{
-		Battlers:  make([]*Battler, 0, 8),
+		Battlers:  make([]*Battler, 0, len(battlers)),
 		State:     atomic.NewInt32(PubRoomState_Init),
 		Id:        time.Now().Unix(),
 		StartTime: time.Now().Unix() + BattleChoseHeroTime,
@@ -20,7 +19,7 @@ func CreatePubRoom( battlers []*Battler,heros []*BattleHero, card_map map[int32]
 		GrantCoin: []int32{3, 4, 5, 6, 7, 8, 9, 10},
 		CardNum:   []int{3, 4, 4, 5, 5, 6},
 		cardLock:  sync.Mutex{},
-		Rank:      atomic.NewInt32(int32(8) + 1),
+		Rank:      atomic.NewInt32(int32(len(battlers)) + 1),
 	}
 	//TODO 初始化卡牌
 	room.Cards = card_map
@@ -30,7 +29,7 @@ func CreatePubRoom( battlers []*Battler,heros []*BattleHero, card_map map[int32]
 			battler.PubCoin = room.PubCoin
 			battler.CardNum = room.CardNum
 			battler.PubRoom = room
-			battler.Id  = int64(10000000+i)
+			battler.Id = int64(10000000 + i)
 			//TODO 初始化能够选择的英雄
 			battler.HeroList = make([]*BattleHero, 2)
 			if len(heros) > 2 {
@@ -126,14 +125,14 @@ func (this *PubRoom) Open() bool {
 
 //开始准备阶段
 func (this *PubRoom) Ready() bool {
-	if time.Now().Unix() < this.StartTime {
-		//for _, battle := range this.Battles {
-		//	if battle.State != BattleState_Finish {
-		//		return false
-		//	}
-		//}
-		return false
+	//if time.Now().Unix() < this.StartTime {
+	for _, battle := range this.Battles {
+		if battle.State != BattleState_Finish {
+			return false
+		}
 	}
+	//return false
+	//}
 	if this.State.CAS(PubRoomState_Battle, PubRoomState_Doing) {
 		this.Round = this.Round + 1
 		this.StartTime = time.Now().Unix() + BattleReadyStepTime
@@ -165,15 +164,18 @@ func (this *PubRoom) Battle() bool {
 	}
 	if this.State.CAS(PubRoomState_Ready, PubRoomState_Doing) {
 		this.StartTime = time.Now().Unix() + BattleBattleStepTime
-		log.Println("战斗开始，总战局 %d", len(this.Battles))
-		for _, battle := range this.Battles {
-			battle.Attacker.Battle()
-			battle.Defender.Battle()
-			go battle._doBattle()
-		}
+		log.Println(fmt.Sprintf("战斗开始，总战局 %d", len(this.Battles)))
 		this.State.CAS(PubRoomState_Doing, PubRoomState_Battle)
+		go func() {
+			for _, battle := range this.Battles {
+				battle.Attacker.Battle()
+				battle.Defender.Battle()
+				battle._doBattle()
+			}
+		}()
 		return true
 	}
+
 	//if this.State.Load() == PubRoomState_Battle {
 	//	return true
 	//} else {
@@ -189,7 +191,7 @@ func (this *PubRoom) _domatch2battle() {
 		if battler1.Rank == battler2.Rank {
 			return (battler1.Hero.Health + battler1.Hero.Armor) <= (battler2.Hero.Health + battler2.Hero.Armor)
 		}
-		return battler1.Rank < battler2.Rank
+		return battler1.Rank > battler2.Rank
 	}
 	var swap = func(data []*Battler, i int, j int) {
 		temp := data[j-1]
@@ -218,6 +220,7 @@ func (this *PubRoom) _domatch2battle() {
 				lived = this.Battlers[:i]
 			} else {
 				lived = this.Battlers[:i+1]
+				lived[len(lived)-1].Rival = nil
 			}
 			break
 		}
@@ -246,12 +249,16 @@ func (this *PubRoom) _domatch2battle() {
 func (this *PubRoom) _domatch(battler *Battler, lived []*Battler) {
 	var rival *Battler
 	for _, b := range lived {
-		if b.Rival == nil {
+		if b.Rival == nil && b != battler {
 			rival = b
 			if rand.Intn(len(lived)) > 0 {
 				break
 			}
 		}
+	}
+	if rival == nil {
+		log.Println(fmt.Sprintf("匹配对战失败%d", len(lived)))
+		return
 	}
 	battler.Rival = rival
 	rival.Rival = battler
@@ -278,14 +285,19 @@ func (this *PubRoom) CardRefresh(battler *Battler, nums int) []*BattleCard {
 		card_arr = append(card_arr, this.Cards[i])
 	}
 	result := make([]*BattleCard, nums)
+	if card_arr == nil || len(card_arr) <= 0 {
+		log.Println("not found refresh card")
+		return nil
+	}
 	for i := 0; i < nums; i++ {
 		if len(card_arr) > 1 {
-			card_id := rand.Intn(len(card_arr))
-			result[i] = card_arr[card_id]
-			card_arr = append(card_arr[:card_id], card_arr[card_id+1:]...)
+			idx := rand.Intn(len(card_arr))
+			result[i] = card_arr[idx]
+			card_arr = append(card_arr[:idx], card_arr[idx+1:]...)
 			delete(this.Cards, result[i].Id)
 		} else {
 			result[i] = card_arr[0]
+			delete(this.Cards, result[i].Id)
 			break
 		}
 	}
@@ -303,17 +315,22 @@ func (this *PubRoom) CardRefreshByLevel(nums int, level int32) []*BattleCard {
 	}
 	result := make([]*BattleCard, nums)
 	for i := 0; i < nums; i++ {
-		card_id := rand.Intn(len(card_arr))
-		result[i] = card_arr[card_id]
-		card_arr = append(card_arr[:card_id], card_arr[card_id+1:]...)
+		idx := rand.Intn(len(card_arr))
+		result[i] = card_arr[idx]
+		card_arr = append(card_arr[:idx], card_arr[idx+1:]...)
 		delete(this.Cards, result[i].Id)
 	}
 	return result
 }
 
-func (this *PubRoom) CardReturn(cards []*BattleCard) {
+func (this *PubRoom) CardReturn(cards ...*BattleCard) {
+	this.cardLock.Lock()
+	defer this.cardLock.Unlock()
 	for _, card := range cards {
-		this.Cards[card.Id] = card
+		if card != nil {
+			card.Owner = nil
+			this.Cards[card.Id] = card
+		}
 	}
 }
 
@@ -326,47 +343,51 @@ type Battle struct {
 }
 
 func (this *Battle) _doBattle() {
-	if len(this.Defender.AideCard) == 0 && len(this.Attacker.AideCard) == 0 {
+	if this.Defender.AideCard.IsEmpty() && this.Attacker.AideCard.IsEmpty() {
 		this.State = BattleState_Finish
 		//TODO 添加 RoundChan
 		log.Println("战斗结束 [%d,%d],伤害[%d]", this.Attacker.Id, this.Defender.Id, this.Harm)
 		//TODO Type类型未定义？
-		round_step := &RoundStep{
-			Type: RoundStepType_BattleOver,
-			Harm: 0,
-		}
-		if this.Attacker.State.Load() != BattlerState_Over {
-			this.Attacker.RoundChan <- round_step
-		}
-		if this.Defender.State.Load() != BattlerState_Over {
-			this.Defender.RoundChan <- round_step
-		}
+		//round_step := &RoundStep{
+		//	Type: RoundStepType_BattleOver,
+		//	Harm: 0,
+		//}
+		//if this.Attacker.State.Load() != BattlerState_Over {
+		//	this.Attacker.RoundChan <- round_step
+		//}
+		//if this.Defender.State.Load() != BattlerState_Over {
+		//	this.Defender.RoundChan <- round_step
+		//}
 		return
 	}
-	if len(this.Defender.AideCard) > len(this.Attacker.AideCard) {
+	if this.Defender.AideCard.Size() > this.Attacker.AideCard.Size() {
 		temp := this.Attacker
 		this.Attacker = this.Defender
 		this.Defender = temp
-	} else if len(this.Defender.AideCard) == len(this.Attacker.AideCard) && rand.Intn(1) == 1 {
+	} else if this.Defender.AideCard.Size() == this.Attacker.AideCard.Size() && rand.Intn(1) == 1 {
 		temp := this.Attacker
 		this.Attacker = this.Defender
 		this.Defender = temp
 	}
-	var round = 1
+	var round1 = 1
+	var round2 = 1
 	var idx1 = 0
 	var idx2 = 0
 	for {
-		idx1 = this._do_attack(round, idx1)
+		idx1 = this._do_attack(round1, idx1)
 		if this.State == BattleState_Finish {
 			return
+		}
+		if idx1 < 0 {
+			idx1 = 0
+			round1++
 		}
 		temp := this.Attacker
 		this.Attacker = this.Defender
 		this.Defender = temp
-		idx2 = this._do_attack(round, idx2)
-		if idx1 < 0 && idx2 < 0 {
-			round++
-			idx1 = 0
+		idx2 = this._do_attack(round2, idx2)
+		if idx2 < 0 {
+			round2++
 			idx2 = 0
 		}
 		if this.State == BattleState_Finish {
@@ -379,14 +400,15 @@ func (this *Battle) _doBattle() {
  * 递归攻击
  */
 func (this *Battle) _do_attack(round int, idx int) int {
-	if this.Defender.AideCard == nil || len(this.Defender.AideCard) == 0 {
+	if this.Defender.AideCard == nil || this.Defender.AideCard.IsEmpty() {
 		this.State = BattleState_Finish
-		if len(this.Attacker.AideCard) > 0 {
+		if !this.Attacker.AideCard.IsEmpty() {
 			this.Winner = this.Attacker
 			this.Harm = this.Attacker.Atk
-			for _, card := range this.Attacker.AideCard {
+			this.Attacker.AideCard.Iteration(func(idx int, card *BattleCard) bool {
 				this.Harm += card.StarLevel
-			}
+				return true
+			})
 			if this.Defender.State.Load() != BattlerState_Over {
 				this.Defender.Harm += this.Harm
 				if this.Defender.Hero.Health <= this.Defender.Harm {
@@ -395,30 +417,37 @@ func (this *Battle) _do_attack(round int, idx int) int {
 			}
 		}
 		//TODO Type类型未定义？
-		round_step := &RoundStep{
-			Type:   RoundStepType_BattleOver,
-			Harm:   this.Harm,
-			Winner: this.Winner,
-		}
-		if this.Attacker.State.Load() != BattlerState_Over {
-			this.Attacker.RoundChan <- round_step
-		}
-		if this.Defender.State.Load() != BattlerState_Over {
-			this.Defender.RoundChan <- round_step
-		}
+		//round_step := &RoundStep{
+		//	Type:   RoundStepType_BattleOver,
+		//	Harm:   this.Harm,
+		//	Winner: this.Winner,
+		//}
+		//if this.Attacker.State.Load() != BattlerState_Over {
+		//	this.Attacker.RoundChan <- round_step
+		//}
+		//if this.Defender.State.Load() != BattlerState_Over {
+		//	this.Defender.RoundChan <- round_step
+		//}
 		if this.Winner != nil {
-			log.Println("战斗结束 [%d,%d],伤害[%d],胜者[%d]", this.Attacker.Id, this.Defender.Id, this.Harm, this.Winner.Id)
+			log.Println(fmt.Sprintf("战斗结束 [%d,%d],伤害[%d,%d,%d],胜者[%d]", this.Attacker.Id, this.Defender.Id, this.Harm, this.Defender.Harm, this.Defender.Hero.Health, this.Winner.Id))
 		} else {
-			log.Println("战斗结束 [%d,%d],伤害[%d]", this.Attacker.Id, this.Defender.Id, this.Harm)
+			log.Println(fmt.Sprintf("战斗结束 [%d,%d],伤害[%d,%d,%d]", this.Attacker.Id, this.Defender.Id, this.Defender.Harm, this.Defender.Hero.Health, this.Harm))
 		}
 		return 0
 	}
-	for i, card := range this.Attacker.AideCard {
-		if card.BattleAddn.Round < int32(round) {
-			card.Attack(this.Defender)
-			card.BattleAddn.Round = int32(round)
-			return i
+	i, attacker := this.Attacker.AideCard.Iteration(func(idx int, card *BattleCard) bool {
+		if card.BattleAddn.Round != int32(round) {
+			return false
 		}
+		return true
+	})
+	if attacker != nil {
+		if attacker.Owner != this.Attacker {
+			log.Println(fmt.Sprintf("卡牌错误 %d %d %d", attacker.Id, attacker.Owner.Id, this.Attacker.Id))
+		}
+		attacker.Attack(this.Defender)
+		attacker.BattleAddn.Round = int32(round)
+		return i
 	}
 	return -1
 }
