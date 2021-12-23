@@ -6,9 +6,9 @@ import (
 )
 
 type BattleCard struct {
-	BattleAddnToSteady bool                // 是否战斗中的属性加成永久保留
-	Id                 int32               //随机自增的的id
-	Name string
+	BattleAddnToSteady bool  // 是否战斗中的属性加成永久保留
+	Id                 int32 //随机自增的的id
+	Name               string
 	StarLevel          int32               //级别
 	Owner              *Battler            //所属的主人
 	BattleAddn         *BattleCardProperty //正常的属性
@@ -42,17 +42,18 @@ type BattleCardProperty struct {
 }
 
 func (this *BattleCard) Attack(defender *Battler) {
-	if defender.AideCard == nil || len(defender.AideCard) == 0 {
+	if defender.AideCard == nil || defender.AideCard.IsEmpty() {
 		return
 	}
-	var target = make([]*BattleCard, 0, len(defender.AideCard))
-	for _, c := range defender.AideCard {
-		if c.BattleAddn.IsSneer {
-			target = append(target, c)
+	var target = make([]*BattleCard, 0, defender.AideCard.Size())
+	defender.AideCard.Iteration(func(idx int, card *BattleCard) bool {
+		if card.BattleAddn.IsSneer {
+			target = append(target, card)
 		}
-	}
+		return true
+	})
 	if len(target) == 0 {
-		target = defender.AideCard
+		target = defender.AideCard.Array()
 	}
 	var t = target[rand.Intn(len(target))]
 	//开始攻击
@@ -66,22 +67,22 @@ func (this *BattleCard) Attack(defender *Battler) {
 	if this.BattleAddn.Harm > this.BattleAddn.Health {
 		this.BattleAddn.IsDie = true
 	}
-	log.Println("card attack [%d,%d],defender[%d,%d]", this.Id, this.BattleAddn.Harm, t.Id, t.BattleAddn.Harm)
+	//log.Println(fmt.Sprintf("card attack [%d,%d],defender[%d,%d]", this.Id, this.BattleAddn.Harm, t.Id, t.BattleAddn.Harm))
 	//TODO Type类型未定义？
-	round_step := &RoundStep{
-		Type:         RoundStepType_GeneralAttack,
-		Attacker:     this.Id,
-		Defender:     t.Id,
-		Harm:         t.BattleAddn.Atk,
-		AttackerHarm: this.BattleAddn.Atk,
-	}
-	if this.Owner.State.Load() != BattlerState_Over {
-		this.Owner.RoundChan <- round_step
-	}
-
-	if t.Owner.State.Load() != BattlerState_Over {
-		t.Owner.RoundChan <- round_step
-	}
+	//round_step := &RoundStep{
+	//	Type:         RoundStepType_GeneralAttack,
+	//	Attacker:     this.Id,
+	//	Defender:     t.Id,
+	//	Harm:         t.BattleAddn.Atk,
+	//	AttackerHarm: this.BattleAddn.Atk,
+	//}
+	//if this.Owner.State.Load() != BattlerState_Over {
+	//	this.Owner.RoundChan <- round_step
+	//}
+	//
+	//if t.Owner.State.Load() != BattlerState_Over {
+	//	t.Owner.RoundChan <- round_step
+	//}
 	//攻击完成
 	t.Owner._do_card_skill(nil, CardSkillStage_DefendAfter, t, this)
 	this.Owner._do_card_skill(nil, CardSkillStage_AttackAfter, this, t)
@@ -101,24 +102,20 @@ func (this *BattleCard) Attack(defender *Battler) {
 }
 
 func (this *BattleCard) Die(defender *Battler) {
-	//TODO 移除队列
-	for i, c := range this.Owner.AideCard {
-		if c.Id == this.Id {
-			this.Owner.AideCard = append(this.Owner.AideCard[:i], this.Owner.AideCard[i+1:]...)
-			//TODO 触发亡语
-			//this.Skill(i, CardSkillStage_Die, this)
-			this.Skill(&Event{
-				Type:     SkillType_Card,
-				Card:     this,
-				Attacker: this.Owner,
-				Defender: defender,
-				Stage:    CardSkillStage_Die,
-				Trigger:  c,
-				Idx:      i,
-			})
-			return
-		}
+	idx, card := this.Owner.AideCard.RemoveByCardId(this.Id)
+	if card != nil {
+		this.Skill(&Event{
+			Type:     SkillType_Card,
+			Card:     this,
+			Attacker: this.Owner,
+			Defender: defender,
+			Stage:    CardSkillStage_Die,
+			Trigger:  card,
+			Idx:      idx,
+		})
+		return
 	}
+	log.Println("==== error ===")
 }
 
 /**
@@ -178,18 +175,18 @@ func (this *BattleCard) _do_skill(event *Event) {
 		for _, step := range steps {
 			//TODO 更新卡牌属性和AddnDetail 根据是否永久属性，更新不同的AddnDetail
 			if step.IsSpecial {
-				this.Owner.RoundChan <- &RoundStep{
-					Type:     step.Type,
-					SkillId:  step.SkillId,
-					Attacker: step.Attacker,
-					Harm:     step.Harm,
-					Health:   step.Health,
-					Atk:      step.Atk,
-					Skill:    step.Skill,
-					IsSneer:  step.IsSneer,
-					IsSacred: step.IsSacred,
-					Receiver: step.Receiver,
-				}
+				//this.Owner.RoundChan <- &RoundStep{
+				//	Type:     step.Type,
+				//	SkillId:  step.SkillId,
+				//	Attacker: step.Attacker,
+				//	Harm:     step.Harm,
+				//	Health:   step.Health,
+				//	Atk:      step.Atk,
+				//	Skill:    step.Skill,
+				//	IsSneer:  step.IsSneer,
+				//	IsSacred: step.IsSacred,
+				//	Receiver: step.Receiver,
+				//}
 			}
 			//TODO 新召唤的卡牌
 			if step.CardCall != nil && len(step.CardCall) > 0 {
@@ -208,7 +205,7 @@ func (this *BattleCard) _do_skill(event *Event) {
 						this.Owner._do_card_skill(event, CardSkillStage_AddnHealth, card)
 					}
 					if step.Atk > 0 || step.Health > 0 {
-						log.Println("start addn 循环")
+						//log.Println("start addn 循环")
 						this.Owner._do_card_skill(event, CardSkillStage_Addn, card)
 					}
 				}
@@ -220,7 +217,7 @@ func (this *BattleCard) _do_skill(event *Event) {
 //属性临时强化
 func (this *BattleCard) _dosteps(step *SkillStep) {
 	this.BattleAddn._addproperty(step)
-	if step.Forever && !this.BattleAddnToSteady && this.BackUp!=nil{
+	if step.Forever && !this.BattleAddnToSteady && this.BackUp != nil {
 		this.BackUp._addproperty(step)
 	}
 }
