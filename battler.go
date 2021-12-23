@@ -37,7 +37,7 @@ type RoundStep struct {
 }
 
 type Battler struct {
-	Id int64
+	Id                int64
 	IsFreeze          bool            //是否冻结当前酒馆的卡牌
 	State             *atomic.Int32   //TODO 是否需要? 状态 0 未开局 1 准备中 2 战斗 3 离线 4 over
 	Rank              int32           //战斗排名
@@ -59,11 +59,11 @@ type Battler struct {
 	Name              string          //玩家称呼
 	PubRoom           *PubRoom        //酒馆房间
 	Rival             *Battler        //当前局对手方
-	BattleCard        []*BattleCard   //拥有的卡牌
-	AideCard          []*BattleCard   //出战的卡牌
-	_AideCardBackup   []*BattleCard   //战斗中的卡牌列表
+	BattleCard        *CardArray      //拥有的卡牌
+	AideCard          *CardArray      //出战的卡牌
+	_AideCardBackup   *CardArray      //战斗中的卡牌列表
+	PubCard           *CardArray      //当前可选择的卡牌 不用map 是为了保证顺序
 	Battles           []*Battle       //战斗列表,按照发生的先后顺序排列
-	PubCard           []*BattleCard   //当前可选择的卡牌 不用map 是为了保证顺序
 	PubCoin           []int32         //升级酒馆花费的金币 下标代表当前等级升级需要的金币
 	GrantCoin         []int32         //每次开局给予的金币
 	CardNum           []int           //每次开局刷新随从的数量
@@ -80,12 +80,13 @@ func BattlerCreate() *Battler {
 		CardSellCoin:    CardSellCoin,
 		State:           atomic.NewInt32(BattlerState_Init),
 		Level:           0, //酒馆级别，从0开始
-		PubCard:         make([]*BattleCard, 0, 6),
-		BattleCard:      make([]*BattleCard, 0, 20),
-		AideCard:        make([]*BattleCard, 0, 7),
+		PubCard:         CardArrayCreate(7),
+		BattleCard:      CardArrayCreate(20),
+		AideCard:        CardArrayCreate(7),
+		_AideCardBackup: CardArrayCreate(7),
 		Battles:         make([]*Battle, 0, 10),
 		lock:            sync.Mutex{},
-		RoundChan:       make(chan *RoundStep, 20),
+		RoundChan:       make(chan *RoundStep, 200),
 	}
 }
 
@@ -103,9 +104,10 @@ func (this *Battler) Open() {
 func (this *Battler) LeaveRoom() {
 	if this.State.CAS(BattlerState_Ready, BattlerState_Over) {
 		this.Rank = this.PubRoom.Rank.Sub(1)
-		log.Println(fmt.Sprintf("玩家[%d]离开房间[%d],战绩[%d]", this.Id, this.PubRoom.Id, this.Rank))
+		log.Println(fmt.Sprintf("玩家[%d]离开房间[%d],战绩[%d] 剩余血量[%d %d]", this.Id, this.PubRoom.Id, this.Rank, this.Hero.Health, this.Harm))
 		delete(Player2Room, this.Id)
 		//close(this.RoundChan)
+		//this.PubRoom.CardReturn(this.PubCard)
 	}
 }
 
@@ -132,16 +134,17 @@ func (this *Battler) Ready() {
 		this.CardRefresh(0, nums)
 	}
 	this.IsFreeze = false
-	if this._AideCardBackup != nil && len(this._AideCardBackup) > 0 {
-		for _, card := range this._AideCardBackup {
+	if this._AideCardBackup != nil && !this._AideCardBackup.IsEmpty() {
+		this.AideCard.Copy(this._AideCardBackup)
+		this.AideCard.Iteration(func(idx int, card *BattleCard) bool {
 			if card.BackUp != nil {
 				card.BattleAddn = card.BackUp
-				card.BattleAddn.IsDie = false
-				card.BattleAddn.Harm = 0
 			}
-		}
-		this.AideCard = make([]*BattleCard, len(this._AideCardBackup))
-		copy(this.AideCard, this._AideCardBackup)
+			card.BattleAddn.IsDie = false
+			card.BattleAddn.Harm = 0
+			return false
+		})
+
 	}
 	//调用准备阶段英雄技能
 	this._do_hero_skill(&Event{
@@ -153,17 +156,16 @@ func (this *Battler) Ready() {
 }
 
 func (this *Battler) Battle() {
-	for _, card := range this.AideCard {
-		if !card.BattleAddnToSteady {
+	this.AideCard.Iteration(func(idx int, card *BattleCard) bool {
+		if card.BattleAddnToSteady {
 			card.BackUp = card.BattleAddn
 		} else {
 			card.BackUp = &BattleCardProperty{}
 			*card.BackUp = *card.BattleAddn
-			//card.BattleAddn.Addn = map[int32]*AddnDetail{}
 		}
-	}
-	this._AideCardBackup = make([]*BattleCard, len(this.AideCard))
-	copy(this._AideCardBackup, this.AideCard)
+		return true
+	})
+	this._AideCardBackup.Copy(this.AideCard)
 	//开战开始阶段英雄被动技能
 	this._do_hero_skill(&Event{
 		Stage:    HeroSkillStage_BattlePassive,
@@ -181,6 +183,7 @@ func (this *Battler) PubUp() error {
 		if err := this._docoin(this.CostLevel); err != nil {
 			return err
 		}
+		log.Println(fmt.Sprintf("玩家升级酒馆[%d %d %d]", this.Id, this.Level, this.Level+1))
 		this.Level += 1
 		this.Atk = this.Level + 1 //TODO 英雄攻击等于酒馆等级?
 		this.CostLevel = this.PubCoin[this.Level]
@@ -192,36 +195,26 @@ func (this *Battler) PubUp() error {
 		this._do_card_skill(nil, CardSkillStage_Pubup, nil)
 		return nil
 	}
-	return errors.New(  "Maximum pub room level 6")
+	return errors.New("Maximum pub room level 6")
 }
 
 //使用卡牌
 func (this *Battler) CardUse(card_id int32, index int, target ...*BattleCard) error {
-	this.lock.Lock()
-	defer this.lock.Unlock()
 	if this.PubRoom.State.Load() == PubRoomState_Ready {
-		if index <= len(this.AideCard) && index >= 0 {
-			for i, card := range this.BattleCard {
-				if card.Id == card_id {
-					this.BattleCard = append(this.BattleCard[:i], this.BattleCard[i+1:]...)
-					card.Owner = this
-					// 需要优化
-					//this.AideCard = append(this.AideCard, nil)
-					//copy(this.AideCard[index+1:], this.AideCard[index:])
-					//this.AideCard[index] = card
-					//this._do_card_skill(CardSkillStage_Use, card, target...)
-					this._do_card_goout(card, index, target...)
-					return nil
-				}
+		if index <= this.AideCard.Size() && index >= 0 {
+			_, card := this.BattleCard.RemoveByCardId(card_id)
+			if card != nil {
+				this._do_card_goout(card, index, target...)
+				return nil
 			}
 		} else {
-			log.Println("invalid index[%d],aidecard[%d]", index, len(this.AideCard))
-			return errors.New(  fmt.Sprintf("invalid index[%d],aidecard[%d]", index, len(this.AideCard)))
+			log.Println("invalid index[%d],aidecard[%d]", index, this.AideCard.Size())
+			return errors.New(fmt.Sprintf("invalid index[%d],aidecard[%d]", index, this.AideCard.Size()))
 		}
 		log.Println("card user not found card in battle card", card_id)
-		return errors.New(  "not found card in battle card")
+		return errors.New("not found card in battle card")
 	}
-	return errors.New( "cards cannot be used In battle")
+	return errors.New("cards cannot be used In battle")
 }
 
 //使用卡牌
@@ -229,47 +222,33 @@ func (this *Battler) CardMove(idx int, moved_idx int) {
 	if idx == moved_idx {
 		return
 	}
-	this.lock.Lock()
-	defer this.lock.Unlock()
-
-	if idx < moved_idx {
-		tmp := this.AideCard[idx]
-		copy(this.AideCard[idx:moved_idx], this.AideCard[idx+1:])
-		this.AideCard[moved_idx] = tmp
-	} else {
-		tmp := this.AideCard[idx]
-		copy(this.AideCard[moved_idx+1:], this.AideCard[moved_idx:idx])
-		this.AideCard[moved_idx] = tmp
-	}
+	this.AideCard.Move(idx, moved_idx)
 }
 
 //卖出卡牌
 func (this *Battler) CardSell(card_id int32) error {
 	this.lock.Lock()
 	defer this.lock.Unlock()
-	for i, card := range this.AideCard {
-		if card.Id == card_id {
-			this.BattleCard = append(this.AideCard[:i], this.AideCard[i+1:]...)
-			//还卖的金币给用户
-			if (this.Coin + this.CardSellCoin) > this.CoinMax {
-				this.Coin = this.CoinMax
-			} else {
-				this.Coin += this.CardSellCoin
-			}
-			// 需要优化
-			//TODO 还牌到酒馆
-			this._do_card_skill(nil, CardSkillStage_Sell, card)
-			return nil
+	_, card := this.AideCard.RemoveByCardId(card_id)
+	if card != nil {
+		//还卖的金币给用户
+		if (this.Coin + this.CardSellCoin) > this.CoinMax {
+			this.Coin = this.CoinMax
+		} else {
+			this.Coin += this.CardSellCoin
 		}
+		// 需要优化
+		//TODO 还牌到酒馆
+		this.PubRoom.CardReturn(card)
+		this._do_card_skill(nil, CardSkillStage_Sell, card)
+		return nil
 	}
 	log.Println("card sell not found card in battle card", card_id)
 	return errors.New("not found card in battle card")
 }
 
 func (this *Battler) _do_card_skill(event *Event, stage int, trigger *BattleCard, target ...*BattleCard) {
-	for i, card := range this.AideCard {
-		//TODO 执行 卡牌战吼技能
-		//card.Skill(i, stage, trigger, target...)
+	this.AideCard.Iteration(func(idx int, card *BattleCard) bool {
 		card.Skill(&Event{
 			Type:     SkillType_Card,
 			Card:     card,
@@ -277,10 +256,11 @@ func (this *Battler) _do_card_skill(event *Event, stage int, trigger *BattleCard
 			Stage:    stage,
 			Trigger:  trigger,
 			Target:   target,
-			Idx:      i,
+			Idx:      idx,
 			Parent:   event,
 		})
-	}
+		return true
+	})
 }
 
 //设置英雄
@@ -342,8 +322,8 @@ func (this *Battler) CardRefresh(coin int32, nums int) error {
 			return err
 		}
 	}
-	this.PubRoom.CardReturn(this.PubCard)
-	this.PubCard = this.PubRoom.CardRefresh(this, nums)
+	this.PubRoom.CardReturn(this.PubCard.Array()...)
+	this.PubCard = CardArrayCreateByArray(this.PubRoom.CardRefresh(this, nums))
 	this.CardRefreshNum++
 	this._do_hero_skill(&Event{
 		Stage:    HeroSkillStage_CardRefresh,
@@ -355,7 +335,7 @@ func (this *Battler) CardRefresh(coin int32, nums int) error {
 //注意,该方法只是发牌,不还牌
 func (this *Battler) CardRefreshBySkill(nums int, level int32) {
 	refreshcard := this.PubRoom.CardRefreshByLevel(nums, level)
-	this.PubCard = append(this.PubCard, refreshcard...)
+	this.PubCard.Add(refreshcard...)
 	this.CardRefreshNum++
 	//TODO 有问题?
 	this._do_hero_skill(&Event{
@@ -366,18 +346,17 @@ func (this *Battler) CardRefreshBySkill(nums int, level int32) {
 
 //买卡
 func (this *Battler) CardBuy(card_id int32) error {
-	this.lock.Lock()
-	defer this.lock.Unlock()
-	if err := this._docoin(this.CardCoin); err != nil {
-		//tlog.Errorf("buy card[%d,%d],error %s ", this.Coin, this.CardCoin, err.Error())
-		return err
-	}
-	for i, card := range this.PubCard {
-		if card.Id == card_id {
-			this.PubCard = append(this.PubCard[:i], this.PubCard[i+1:]...)
-			this._do_addcard(card)
-			return nil
+	{
+		this.lock.Lock()
+		defer this.lock.Unlock()
+		if err := this._docoin(this.CardCoin); err != nil {
+			return err
 		}
+	}
+	_, card := this.PubCard.RemoveByCardId(card_id)
+	if card != nil {
+		this._do_addcard(card)
+		return nil
 	}
 	return errors.New("card not found")
 }
@@ -385,17 +364,15 @@ func (this *Battler) CardBuy(card_id int32) error {
 //添加卡牌到手牌
 func (this *Battler) _do_addcard(card *BattleCard) {
 	//TODO 判断卡牌组合
-	this.BattleCard = append(this.BattleCard, card)
-	log.Println(fmt.Sprintf("battler[%d]有手牌[%d]张,新增[%s]", this.Id, len(this.BattleCard), card.Name))
+	card.Owner = this
+	this.BattleCard.Add(card)
 	this._do_card_skill(nil, CardSkillStage_Buy, card)
 }
 
 //添加卡牌
 func (this *Battler) _do_card_goout(card *BattleCard, idx int, target ...*BattleCard) {
-	//TODO 判断卡牌组合
-	this.AideCard = append(this.AideCard, nil)
-	copy(this.AideCard[idx+1:], this.AideCard[idx:])
-	this.AideCard[idx] = card
+	this.AideCard.Insert(card, idx)
+	//log.Println(fmt.Sprintf("卡牌添加到数组 %d %d %d", card.Id, card.Owner.Id, this.Id))
 	//TODO 战斗中召唤的卡牌 触发 战吼？
 	this._do_card_skill(nil, CardSkillStage_Use, card, target...)
 	this._do_hero_skill(&Event{
@@ -405,7 +382,6 @@ func (this *Battler) _do_card_goout(card *BattleCard, idx int, target ...*Battle
 		Idx:      idx,
 		Target:   target,
 	})
-	log.Println(fmt.Sprintf("battler[%d]出战手牌[%d]张,新增[%s]", this.Id, len(this.AideCard), card.Name))
 }
 
 func (this *Battler) _docoin(coin int32) error {
@@ -414,7 +390,7 @@ func (this *Battler) _docoin(coin int32) error {
 		return nil
 	}
 	//tlog.Error("扣除金币余额不足 ", this.PubRoom.Round, this.Player.Base.Id, this.Coin, coin)
-	return errors.New(  "not enough gold coins")
+	return errors.New("not enough gold coins")
 }
 
 func (this *Battler) _do_hero_skill(event *Event) {
@@ -423,18 +399,18 @@ func (this *Battler) _do_hero_skill(event *Event) {
 	if steps != nil && len(steps) > 0 {
 		for _, step := range steps {
 			if step.IsSpecial {
-				this.RoundChan <- &RoundStep{
-					Type:     step.Type,
-					SkillId:  step.SkillId,
-					Attacker: step.Attacker,
-					Harm:     step.Harm,
-					Health:   step.Health,
-					Atk:      step.Atk,
-					Skill:    step.Skill,
-					IsSneer:  step.IsSneer,
-					IsSacred: step.IsSacred,
-					Receiver: step.Receiver,
-				}
+				//this.RoundChan <- &RoundStep{
+				//	Type:     step.Type,
+				//	SkillId:  step.SkillId,
+				//	Attacker: step.Attacker,
+				//	Harm:     step.Harm,
+				//	Health:   step.Health,
+				//	Atk:      step.Atk,
+				//	Skill:    step.Skill,
+				//	IsSneer:  step.IsSneer,
+				//	IsSacred: step.IsSacred,
+				//	Receiver: step.Receiver,
+				//}
 			}
 			//TODO 新召唤的卡牌
 			if step.CardCall != nil && len(step.CardCall) > 0 {
